@@ -588,7 +588,7 @@ const ResizableImage = React.memo(
             disableTransitionOnScaledImage
           ) {
             const disabledTransition =
-              disableTransitionOnScaledImage && scale.value > 1;
+              disableTransitionOnScaledImage && scale.value > 1 || shouldClose.value;
 
             const moveX = withRubberBandClamp(
               transX,
@@ -617,7 +617,7 @@ const ResizableImage = React.memo(
                 transX,
                 0.55,
                 width,
-                disableTransitionOnScaledImage && scale.value > 1
+                disableTransitionOnScaledImage && scale.value > 1 || shouldClose.value
                   ? [getPosition(index), getPosition(index + 1)]
                   : [getPosition(length - 1), 0]
               );
@@ -677,7 +677,7 @@ const ResizableImage = React.memo(
             })
             .map((i) => getPosition(i));
 
-          if (disableTransitionOnScaledImage && scale.value > 1) {
+          if (disableTransitionOnScaledImage && scale.value > 1 || shouldClose.value)  {
             snapPoints = [getPosition(index)];
           }
 

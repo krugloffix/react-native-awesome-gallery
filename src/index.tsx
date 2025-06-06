@@ -10,7 +10,6 @@ import {
   Image,
   StyleSheet,
   useWindowDimensions,
-  View,
   ViewStyle,
 } from 'react-native';
 import Animated, {
@@ -24,9 +23,17 @@ import Animated, {
   withSpring,
   cancelAnimation,
 } from 'react-native-reanimated';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import { useVector } from 'react-native-redash';
-import { clamp, withDecaySpring, withRubberBandClamp } from './utils';
+import {
+  Gesture,
+  GestureDetector,
+  GestureHandlerRootView,
+} from 'react-native-gesture-handler';
+import {
+  clamp,
+  withDecaySpring,
+  withRubberBandClamp,
+  resizeImage,
+} from './utils';
 
 const rtl = I18nManager.isRTL;
 
@@ -37,6 +44,12 @@ const SPACE_BETWEEN_IMAGES = 40;
 type Dimensions = {
   height: number;
   width: number;
+};
+
+export const useVector = (x1 = 0, y1?: number) => {
+  const x = useSharedValue(x1);
+  const y = useSharedValue(y1 ?? x1);
+  return { x, y };
 };
 
 export const snapPoint = (
@@ -77,11 +90,12 @@ const defaultRenderImage = ({
 type EventsCallbacks = {
   onSwipeToClose?: () => void;
   onTap?: () => void;
-  onDoubleTap?: () => void;
+  onDoubleTap?: (toScale: number) => void;
   onLongPress?: () => void;
-  onScaleStart?: () => void;
+  onScaleStart?: (scale: number) => void;
   onScaleEnd?: (scale: number) => void;
   onPanStart?: () => void;
+  onTranslationYChange?: (translationY: number, shouldClose: boolean) => void;
 };
 
 type RenderItem<T> = (
@@ -105,6 +119,7 @@ type Props<T> = EventsCallbacks & {
   doubleTapScale: number;
   maxScale: number;
   pinchEnabled: boolean;
+  swipeEnabled: boolean;
   doubleTapEnabled: boolean;
   disableTransitionOnScaledImage: boolean;
   hideAdjacentImagesOnScaledImage: boolean;
@@ -150,6 +165,7 @@ const ResizableImage = React.memo(
     doubleTapInterval,
     maxScale,
     pinchEnabled,
+    swipeEnabled,
     doubleTapEnabled,
     disableTransitionOnScaledImage,
     hideAdjacentImagesOnScaledImage,
@@ -159,6 +175,7 @@ const ResizableImage = React.memo(
     length,
     onScaleChange,
     onScaleChangeRange,
+    onTranslationYChange,
     setRef,
   }: Props<T>) => {
     const CENTER = {
@@ -334,32 +351,6 @@ const ResizableImage = React.memo(
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [index]);
 
-    const animatedStyle = useAnimatedStyle(() => {
-      const isNextForLast =
-        loop &&
-        isFirst &&
-        currentIndex.value === length - 1 &&
-        translateX.value < getPosition(length - 1);
-      const isPrevForFirst =
-        loop &&
-        isLast &&
-        currentIndex.value === 0 &&
-        translateX.value > getPosition(0);
-      return {
-        transform: [
-          {
-            translateX:
-              offset.x.value +
-              translation.x.value -
-              (isNextForLast ? getPosition(length) : 0) +
-              (isPrevForFirst ? getPosition(length) : 0),
-          },
-          { translateY: offset.y.value + translation.y.value },
-          { scale: scale.value },
-        ],
-      };
-    });
-
     const setImageDimensions: RenderItemInfo<T>['setImageDimensions'] = ({
       width: w,
       height: h,
@@ -367,30 +358,15 @@ const ResizableImage = React.memo(
       originalLayout.x.value = w;
       originalLayout.y.value = h;
 
-      const portrait = width > height;
-
-      if (portrait) {
-        const imageHeight = Math.min((h * width) / w, height);
-        const imageWidth = Math.min(w, width);
-        layout.y.value = imageHeight;
-        if (imageHeight === height) {
-          layout.x.value = (w * height) / h;
-        } else {
-          layout.x.value = imageWidth;
-        }
-      } else {
-        const imageWidth = Math.min((w * height) / h, width);
-        const imageHeight = Math.min(h, height);
-        layout.x.value = imageWidth;
-        if (imageWidth === width) {
-          layout.y.value = (h * width) / w;
-        } else {
-          layout.y.value = imageHeight;
-        }
-      }
+      const imgLayout = resizeImage({ width: w, height: h }, { width, height });
+      layout.x.value = imgLayout.width;
+      layout.y.value = imgLayout.height;
     };
 
     useEffect(() => {
+      if (originalLayout.x.value === 0 && originalLayout.y.value === 0) {
+        return;
+      }
       setImageDimensions({
         width: originalLayout.x.value,
         height: originalLayout.y.value,
@@ -412,7 +388,7 @@ const ResizableImage = React.memo(
         'worklet';
         if (!isActive.value) return;
         if (onScaleStart) {
-          runOnJS(onScaleStart)();
+          runOnJS(onScaleStart)(scale.value);
         }
 
         onStart();
@@ -528,7 +504,25 @@ const ResizableImage = React.memo(
     const shouldClose = useSharedValue(false);
     const isMoving = useVector(0);
 
+    useAnimatedReaction(
+      () => {
+        if (!onTranslationYChange) {
+          return null;
+        }
+        return translation.y.value;
+      },
+      (ty, prevTy) => {
+        if (ty === null || (!ty && !prevTy)) {
+          return;
+        }
+        if (onTranslationYChange) {
+          onTranslationYChange(Math.abs(ty), shouldClose.value);
+        }
+      }
+    );
+
     const panGesture = Gesture.Pan()
+      .enabled(swipeEnabled)
       .minDistance(10)
       .maxPointers(1)
       .onBegin(() => {
@@ -735,6 +729,8 @@ const ResizableImage = React.memo(
           return;
         }
 
+        shouldClose.value = false;
+
         if (newHeight > height) {
           isMoving.y.value = 1;
           offset.y.value = withDecaySpring(
@@ -799,7 +795,7 @@ const ResizableImage = React.memo(
           return;
         }
         if (onDoubleTap) {
-          runOnJS(onDoubleTap)();
+          runOnJS(onDoubleTap)(scale.value === 1 ? doubleTapScale : 1);
         }
 
         if (scale.value === 1) {
@@ -840,6 +836,43 @@ const ResizableImage = React.memo(
         }
       });
 
+    const containerAnimatedStyle = useAnimatedStyle(() => {
+      return {
+        zIndex: index === currentIndex.value ? 1 : 0,
+        transform: [
+          {
+            translateX: getPosition(rtl ? index : -index),
+          },
+        ],
+      };
+    });
+
+    const animatedStyle = useAnimatedStyle(() => {
+      const isNextForLast =
+        loop &&
+        isFirst &&
+        currentIndex.value === length - 1 &&
+        translateX.value < getPosition(length - 1);
+      const isPrevForFirst =
+        loop &&
+        isLast &&
+        currentIndex.value === 0 &&
+        translateX.value > getPosition(0);
+      return {
+        transform: [
+          {
+            translateX:
+              offset.x.value +
+              translation.x.value -
+              (isNextForLast ? getPosition(rtl ? -length : length) : 0) +
+              (isPrevForFirst ? getPosition(rtl ? -length : length) : 0),
+          },
+          { translateY: offset.y.value + translation.y.value },
+          { scale: scale.value },
+        ],
+      };
+    });
+
     return (
       <GestureDetector
         gesture={Gesture.Race(
@@ -850,11 +883,17 @@ const ResizableImage = React.memo(
           Gesture.Exclusive(doubleTapGesture, tapGesture)
         )}
       >
-        <View style={{ width, height }}>
+        <Animated.View
+          style={[
+            styles.itemContainer,
+            { width, height },
+            containerAnimatedStyle,
+          ]}
+        >
           <Animated.View style={[{ width, height }, animatedStyle]}>
             {renderItem(itemProps)}
           </Animated.View>
-        </View>
+        </Animated.View>
       </GestureDetector>
     );
   }
@@ -883,6 +922,7 @@ type GalleryProps<T> = EventsCallbacks & {
   style?: ViewStyle;
   containerDimensions?: { width: number; height: number };
   pinchEnabled?: boolean;
+  swipeEnabled?: boolean;
   doubleTapEnabled?: boolean;
   disableTransitionOnScaledImage?: boolean;
   hideAdjacentImagesOnScaledImage?: boolean;
@@ -904,6 +944,7 @@ const GalleryComponent = <T extends any>(
     doubleTapInterval = 500,
     maxScale = MAX_SCALE,
     pinchEnabled = true,
+    swipeEnabled = true,
     doubleTapEnabled = true,
     disableTransitionOnScaledImage = false,
     hideAdjacentImagesOnScaledImage = false,
@@ -992,7 +1033,7 @@ const GalleryComponent = <T extends any>(
   }, [data?.length, dimensions.width]);
 
   return (
-    <View style={[styles.container, style]}>
+    <GestureHandlerRootView style={[styles.container, style]}>
       <Animated.View style={[styles.rowContainer, animatedStyle]}>
         {data.map((item: any, i) => {
           const isFirst = i === 0;
@@ -1005,55 +1046,50 @@ const GalleryComponent = <T extends any>(
           const hidden =
             Math.abs(i - index) > (numToRender - 1) / 2 && outOfLoopRenderRange;
 
+          if (hidden) {
+            return null;
+          }
+
           return (
-            <View
+            // @ts-ignore
+            <ResizableImage
               key={
                 keyExtractor
                   ? keyExtractor(item, i)
                   : item.id || item.key || item._id || item
               }
-              style={[
-                dimensions,
-                isFirst ? {} : { marginLeft: emptySpaceWidth },
-                index === i ? styles.activeItem : styles.inactiveItem,
-              ]}
-            >
-              {hidden ? null : (
-                // @ts-ignore
-                <ResizableImage
-                  {...{
-                    translateX,
-                    item,
-                    currentIndex,
-                    index: i,
-                    isFirst,
-                    isLast: i === data.length - 1,
-                    length: data.length,
-                    renderItem,
-                    emptySpaceWidth,
-                    doubleTapScale,
-                    doubleTapInterval,
-                    maxScale,
-                    pinchEnabled,
-                    doubleTapEnabled,
-                    disableTransitionOnScaledImage,
-                    hideAdjacentImagesOnScaledImage,
-                    disableVerticalSwipe,
-                    disableSwipeUp,
-                    loop: isLoop,
-                    onScaleChange,
-                    onScaleChangeRange,
-                    setRef,
-                    ...eventsCallbacks,
-                    ...dimensions,
-                  }}
-                />
-              )}
-            </View>
+              {...{
+                translateX,
+                item,
+                currentIndex,
+                index: i,
+                isFirst,
+                isLast: i === data.length - 1,
+                length: data.length,
+                renderItem,
+                emptySpaceWidth,
+                doubleTapScale,
+                doubleTapInterval,
+                maxScale,
+                pinchEnabled,
+                swipeEnabled,
+                doubleTapEnabled,
+                disableTransitionOnScaledImage,
+                hideAdjacentImagesOnScaledImage,
+                disableVerticalSwipe,
+                disableSwipeUp,
+                loop: isLoop,
+                onScaleChange,
+                onScaleChangeRange,
+                setRef,
+                ...eventsCallbacks,
+                ...dimensions,
+              }}
+            />
           );
         })}
       </Animated.View>
-    </View>
+    </GestureHandlerRootView>
   );
 };
 
@@ -1063,9 +1099,8 @@ const Gallery = React.forwardRef(GalleryComponent) as <T extends any>(
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'black' },
-  rowContainer: { flex: 1, flexDirection: 'row' },
-  activeItem: { zIndex: 1 },
-  inactiveItem: { zIndex: 0 },
+  rowContainer: { flex: 1 },
+  itemContainer: { position: 'absolute' },
 });
 
 export default Gallery;
